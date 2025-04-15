@@ -210,7 +210,7 @@
   <script src="map-app.js"></script>
 
 
-  <!-- Floating Search Bar (Initially Hidden) -->
+  <input type="file" id="polygon-file-input" accept=".json,.kml" style="display: none;" />
 
 
 <!-- Custom Context Menu -->
@@ -229,6 +229,13 @@
       <div onclick="startMeasuring()"><i class="fa-solid fa-pencil colored-icon green"></i> Start Measuring</div>
       <div onclick="endMeasuring()"><i class="fa-solid fa-xmark colored-icon red"></i> End Measuring</div>
       <div onclick="createPolygonFromMeasurement()"><i class="fa-solid fa-draw-polygon colored-icon blue"></i> Create Polygon</div>
+    </div>
+  </div>
+  <div class="menu-item">
+    Export
+    <div class="submenu">
+      <div onclick="promptExportPolygons()">💾 Save All Polygons</div>
+      <div onclick="triggerImport()">📂 Load Polygons</div>
     </div>
   </div>
 </div>

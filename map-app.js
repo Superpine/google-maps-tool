@@ -95,6 +95,26 @@ const loader = new google.maps.plugins.loader.Loader({
       }
   
     locateMe();
+
+    document.getElementById("polygon-file-input").addEventListener("change", function (e) {
+      const file = e.target.files[0];
+      if (!file) return;
+    
+      const reader = new FileReader();
+      reader.onload = function (event) {
+        const content = event.target.result;
+    
+        if (file.name.endsWith(".json")) {
+          const json = JSON.parse(content);
+          json.forEach(importPolygonFromData);
+        } else {
+          alert("KML import not supported yet — JSON only for now.");
+        }
+      };
+    
+      reader.readAsText(file);
+    });
+
   }).catch(err => {
     console.error("Google Maps failed to load:", err);
   });
@@ -192,6 +212,137 @@ function hideContextMenu() {
   contextMenu.style.display = "none";
 }
 
+function convertPolygonsToKML(data) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    ${data.map(polygon => `
+      <Placemark>
+        <name>${polygon.name}</name>
+        <Polygon>
+          <outerBoundaryIs>
+            <LinearRing>
+              <coordinates>
+                ${polygon.path.map(pt => `${pt.lng},${pt.lat},0`).join(' ')}
+              </coordinates>
+            </LinearRing>
+          </outerBoundaryIs>
+        </Polygon>
+      </Placemark>
+    `).join('')}
+  </Document>
+</kml>`;
+}
+
+function toGeoJSON(data) {
+  return {
+    type: "FeatureCollection",
+    features: data.map(p => ({
+      type: "Feature",
+      properties: {
+        name: p.name,
+        style: p.style
+      },
+      geometry: {
+        type: "Polygon",
+        coordinates: [p.path.map(pt => [pt.lng, pt.lat])]
+      }
+    }))
+  };
+}
+
+async function savePolygonsWithDialog(data) {
+  const handle = await window.showSaveFilePicker({
+    suggestedName: "polygons.json",
+    types: [
+      {
+        description: "Polygon Files",
+        accept: {
+          "application/json": [".json"],
+          "application/geo+json": [".geojson"],
+          "application/vnd.google-earth.kml+xml": [".kml"]
+        }
+      }
+    ]
+  });
+
+  const fileName = handle.name;
+  let content = "";
+  let mimeType = "application/json";
+
+  if (fileName.endsWith(".kml")) {
+    content = convertPolygonsToKML(data);
+    mimeType = "application/vnd.google-earth.kml+xml";
+  } else if (fileName.endsWith(".geojson")) {
+    content = JSON.stringify(toGeoJSON(data), null, 2);
+    mimeType = "application/geo+json";
+  } else {
+    content = JSON.stringify(data, null, 2); // default JSON format
+    mimeType = "application/json";
+  }
+
+  const writable = await handle.createWritable();
+  await writable.write(new Blob([content], { type: mimeType }));
+  await writable.close();
+}
+
+async function promptExportPolygons() {
+  hideContextMenu();
+
+  const data = polygonList.map(p => ({
+    name: p.name,
+    path: p.polygon.getPath().getArray().map(latlng => ({
+      lat: latlng.lat(),
+      lng: latlng.lng()
+    })),
+    style: p.style
+  }));
+
+  await savePolygonsWithDialog(data);
+}
+
+function downloadFile(blob, filename) {
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+}
+
+function triggerImport() {
+  hideContextMenu();
+  document.getElementById("polygon-file-input").click();
+}
+
+
+
+function importPolygonFromData(data) {
+  const path = data.path.map(p => new google.maps.LatLng(p.lat, p.lng));
+  const polygon = new google.maps.Polygon({
+    paths: path,
+    strokeColor: data.style.strokeColor,
+    strokeOpacity: data.style.strokeOpacity,
+    strokeWeight: data.style.strokeWeight,
+    fillColor: data.style.fillColor,
+    fillOpacity: data.style.fillOpacity,
+    editable: false,
+    draggable: true,
+    map
+  });
+
+  const label = new google.maps.Marker({
+    position: getPolygonCenter(path),
+    label: { text: data.name, color: "#333", fontSize: "12px", fontWeight: "bold" },
+    icon: { path: google.maps.SymbolPath.CIRCLE, scale: 0 },
+    map
+  });
+
+  polygon.addListener("rightclick", function (event) {
+    showPolygonContextMenu(polygon, event.latLng, event.domEvent);
+  });
+
+  polygonList.push({ name: data.name, polygon, label, style: data.style });
+}
+
 function onMapRightClick(e) {
     e.domEvent.preventDefault();
   
@@ -257,34 +408,70 @@ function onMapRightClick(e) {
     }
   }
 
-  document.addEventListener("keydown", function (e) {
-    const menu = document.getElementById("context-menu");
-    if (menu.style.display === "block") {
-      const focusable = menu.querySelectorAll('[tabindex="0"]');
-      const current = document.activeElement;
-      const index = Array.from(focusable).indexOf(current);
-  
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        const next = focusable[index + 1] || focusable[0];
-        next.focus();
-      }
-  
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        const prev = focusable[index - 1] || focusable[focusable.length - 1];
-        prev.focus();
-      }
-  
-      if (e.key === "Escape") {
-        hideContextMenu();
-      }
-  
-      if (e.key === "Enter") {
-        current.click();
-      }
+  let copiedPolygonMeta = null;
+
+document.addEventListener("keydown", function (e) {
+  // 🔁 COPY / PASTE for polygons
+  if (e.ctrlKey && e.key === "Delete" && selectedPolygon) {
+    console.log("Delet polygon:", copiedPolygonMeta?.name);
+    //const polyToBeDeleted = polygonList.find(selectedPolygon);
+    return;
+  }
+
+
+  if (e.ctrlKey && e.key === "c" && selectedPolygon) {
+    copiedPolygonMeta = polygonList.find(p => p.polygon === selectedPolygon);
+    console.log("Copied polygon:", copiedPolygonMeta?.name);
+    return;
+  }
+
+  if (e.ctrlKey && e.key === "v" && copiedPolygonMeta) {
+    const originalPath = copiedPolygonMeta.polygon.getPath().getArray();
+    const offsetPath = originalPath.map(p => new google.maps.LatLng(p.lat() + 0.0001, p.lng() + 0.0001));
+
+    pendingPath = offsetPath;
+
+    document.getElementById("poly-name").value = "";
+    document.getElementById("stroke-color").value = copiedPolygonMeta.style.strokeColor;
+    document.getElementById("stroke-opacity").value = copiedPolygonMeta.style.strokeOpacity;
+    document.getElementById("stroke-weight").value = copiedPolygonMeta.style.strokeWeight;
+    document.getElementById("fill-color").value = copiedPolygonMeta.style.fillColor;
+    document.getElementById("fill-opacity").value = copiedPolygonMeta.style.fillOpacity;
+
+    document.getElementById("polygon-modal").style.display = "block";
+    editingPolygonMeta = null;
+
+    return;
+  }
+
+  // ⬇️ CONTEXT MENU NAVIGATION
+  const menu = document.getElementById("context-menu");
+  if (menu.style.display === "block") {
+    const focusable = menu.querySelectorAll('[tabindex="0"]');
+    const current = document.activeElement;
+    const index = Array.from(focusable).indexOf(current);
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      const next = focusable[index + 1] || focusable[0];
+      next.focus();
     }
-  });
+
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      const prev = focusable[index - 1] || focusable[focusable.length - 1];
+      prev.focus();
+    }
+
+    if (e.key === "Escape") {
+      hideContextMenu();
+    }
+
+    if (e.key === "Enter") {
+      current.click();
+    }
+  }
+});
   
 
   window.startMeasuring = function () {
@@ -386,8 +573,12 @@ function onMapRightClick(e) {
   
       polygonList.push({ name, polygon, label: nameLabel, style: { strokeColor, strokeOpacity, strokeWeight, fillColor, fillOpacity } });
   
-      polygon.addListener("rightclick", function (event) {
+      /* polygon.addListener("rightclick", function (event) {
         showPolygonContextMenu(polygon, event.latLng);
+      }); */
+
+      polygon.addListener("rightclick", function (event) {
+        showPolygonContextMenu(polygon, event.latLng, event.domEvent);
       });
 
       polygon.addListener("dragend", function () {
@@ -405,6 +596,34 @@ function onMapRightClick(e) {
         const meta = polygonList.find(p => p.polygon === polygon);
         if (meta && meta.label) {
           meta.label.setPosition(center);
+        }
+      });
+
+      polygon.addListener("click", function () {
+        if (selectedPolygon && selectedPolygon !== polygon) {
+          selectedPolygon.setEditable(false);
+        }
+      
+        selectedPolygon = polygon;
+      });
+
+      polygon.addListener("mousedown", function (e) {
+        if (e.domEvent.ctrlKey) {
+          const path = polygon.getPath();
+          let closestIdx = -1;
+          let closestDist = Infinity;
+      
+          path.forEach((point, index) => {
+            const dist = google.maps.geometry.spherical.computeDistanceBetween(point, e.latLng);
+            if (dist < 10) { // within 10 meters
+              closestIdx = index;
+              closestDist = dist;
+            }
+          });
+      
+          if (closestIdx >= 0 && path.getLength() > 3) {
+            path.removeAt(closestIdx);
+          }
         }
       });
     }
@@ -428,7 +647,7 @@ function onMapRightClick(e) {
     return { x: pixelOffset.x, y: pixelOffset.y };
   }
 
-  function showPolygonContextMenu(polygon, latLng) {
+  /* function showPolygonContextMenu(polygon, latLng) {
     selectedPolygon = polygon;
   
     const projection = map.getProjection();
@@ -445,7 +664,17 @@ function onMapRightClick(e) {
     menu.style.left = `${x}px`;
     menu.style.top = `${y}px`;
     menu.style.display = "block";
-  }
+  } */
+
+    function showPolygonContextMenu(polygon, latLng, domEvent) {
+      selectedPolygon = polygon;
+    
+      const menu = document.getElementById("polygon-menu");
+    
+      menu.style.left = `${domEvent.clientX}px`;
+      menu.style.top = `${domEvent.clientY}px`;
+      menu.style.display = "block";
+    }
   
   function hidePolygonMenu() {
     document.getElementById("polygon-menu").style.display = "none";
