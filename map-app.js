@@ -17,6 +17,7 @@ const loader = new google.maps.plugins.loader.Loader({
   let polygonList = [];
   let pendingPath = null; // temp storage for current measurement path
   let selectedPolygon = null;
+  let currentLevel = null;
   
   loader.load().then(async () => {
     const { Map } = await google.maps.importLibrary("maps");
@@ -104,11 +105,14 @@ const loader = new google.maps.plugins.loader.Loader({
       reader.onload = function (event) {
         const content = event.target.result;
     
-        if (file.name.endsWith(".json")) {
+        if (file.name.endsWith(".geojson")) {
+          const geojson = JSON.parse(content);
+          importPolygonsFromGeoJSON(geojson);
+        } else if (file.name.endsWith(".json")) {
           const json = JSON.parse(content);
           json.forEach(importPolygonFromData);
         } else {
-          alert("KML import not supported yet — JSON only for now.");
+          alert("Unsupported file type.");
         }
       };
     
@@ -313,7 +317,15 @@ function triggerImport() {
   document.getElementById("polygon-file-input").click();
 }
 
+function showToast(message, duration = 3000) {
+  const toast = document.getElementById("toast");
+  toast.textContent = message;
+  toast.classList.add("show");
 
+  setTimeout(() => {
+    toast.classList.remove("show");
+  }, duration);
+}
 
 function importPolygonFromData(data) {
   const path = data.path.map(p => new google.maps.LatLng(p.lat, p.lng));
@@ -341,6 +353,69 @@ function importPolygonFromData(data) {
   });
 
   polygonList.push({ name: data.name, polygon, label, style: data.style });
+}
+
+function importPolygonsFromGeoJSON(geojson) {
+  if (!geojson.features || !Array.isArray(geojson.features)) {
+    alert("Invalid GeoJSON structure.");
+    return;
+  }
+
+  geojson.features.forEach(feature => {
+    if (
+      feature.geometry?.type === "Polygon" &&
+      Array.isArray(feature.geometry.coordinates)
+    ) {
+      const coordinates = feature.geometry.coordinates[0]; // Outer ring
+      const path = coordinates.map(coord => new google.maps.LatLng(coord[1], coord[0]));
+
+      const style = feature.properties?.style || {
+        strokeColor: "#00A",
+        strokeOpacity: 0.8,
+        strokeWeight: 2,
+        fillColor: "#00A",
+        fillOpacity: 0.25
+      };
+
+      const name = feature.properties?.name || "Imported Polygon";
+
+      const polygon = new google.maps.Polygon({
+        paths: path,
+        strokeColor: style.strokeColor,
+        strokeOpacity: style.strokeOpacity,
+        strokeWeight: style.strokeWeight,
+        fillColor: style.fillColor,
+        fillOpacity: style.fillOpacity,
+        editable: false,
+        draggable: true,
+        map
+      });
+
+      const label = new google.maps.Marker({
+        position: getPolygonCenter(path),
+        label: { text: name, color: "#333", fontSize: "12px", fontWeight: "bold" },
+        icon: { path: google.maps.SymbolPath.CIRCLE, scale: 0 },
+        map
+      });
+
+      polygon.addListener("rightclick", function (event) {
+        showPolygonContextMenu(polygon, event.latLng, event.domEvent);
+      });
+
+      polygonList.push({ name, polygon, label, style });
+    }
+  });
+
+  let importCount = 0;
+geojson.features.forEach(feature => {
+  if (feature.geometry?.type === "Polygon" && Array.isArray(feature.geometry.coordinates)) {
+    // existing import logic...
+    importCount++;
+  }
+});
+if (importCount > 0) {
+  showToast(`✅ Imported ${importCount} polygon${importCount > 1 ? 's' : ''} successfully`);
+}
 }
 
 function onMapRightClick(e) {
@@ -511,6 +586,52 @@ document.addEventListener("keydown", function (e) {
     path.forEach(point => bounds.extend(point));
     return bounds.getCenter();
   }
+
+  function renderPolygonLevel() {
+    // Hide all polygons
+    function hideAll(list) {
+      list.forEach(meta => {
+        meta.polygon.setMap(null);
+        meta.label.setMap(null);
+        if (meta.children) hideAll(meta.children);
+      });
+    }
+  
+    hideAll(polygonList);
+  
+    // Show current level
+    const toShow = currentLevel ? currentLevel.children : polygonList;
+    toShow.forEach(meta => {
+      meta.polygon.setMap(map);
+      meta.label.setMap(map);
+    });
+  
+    showToast(`Viewing ${currentLevel?.name || "top-level"} polygons`);
+  }
+
+  function attachHierarchyNavigation(polygon, metadata) {
+    polygon.addListener("click", (e) => {
+      if (e.domEvent.altKey && e.domEvent.shiftKey) {
+        // Set the clicked polygon as the new current level
+        currentLevel = metadata;
+    
+        // Render the polygons at the new current level (which may be empty initially)
+        renderPolygonLevel();
+      }
+    });
+  
+    polygon.addListener("rightclick", (e) => {
+      if (e.domEvent.altKey && e.domEvent.shiftKey) {
+        if (metadata.parent) {
+          currentLevel = metadata.parent;
+          renderPolygonLevel();
+        } else {
+          currentLevel = null;
+          renderPolygonLevel();
+        }
+      }
+    });
+  }
   
   function savePolygon() {
     const name = document.getElementById("poly-name").value.trim();
@@ -570,12 +691,31 @@ document.addEventListener("keydown", function (e) {
         icon: { path: google.maps.SymbolPath.CIRCLE, scale: 0 },
         map
       });
+
+      const newPolygonMeta = {
+        name: name,
+        polygon: polygon,
+        label: nameLabel,
+        style: {
+          strokeColor: '#FF0000',
+          strokeOpacity: 0.8,
+          strokeWeight: 2,
+          fillColor: '#FF0000',
+          fillOpacity: 0.35
+        },
+        children: [],
+        parent: currentLevel
+      };
   
-      polygonList.push({ name, polygon, label: nameLabel, style: { strokeColor, strokeOpacity, strokeWeight, fillColor, fillOpacity } });
-  
+      //polygonList.push({ name, polygon, label: nameLabel, style: { strokeColor, strokeOpacity, strokeWeight, fillColor, fillOpacity } });
+      const targetList = currentLevel ? currentLevel.children : polygonList;
+          targetList.push(newPolygonMeta);
+
       /* polygon.addListener("rightclick", function (event) {
         showPolygonContextMenu(polygon, event.latLng);
       }); */
+
+
 
       polygon.addListener("rightclick", function (event) {
         showPolygonContextMenu(polygon, event.latLng, event.domEvent);
@@ -626,6 +766,10 @@ document.addEventListener("keydown", function (e) {
           }
         }
       });
+
+      
+
+      attachHierarchyNavigation(polygon, newPolygonMeta); // after you’ve defined newPolygonMeta
     }
 
     
