@@ -119,6 +119,9 @@ const loader = new google.maps.plugins.loader.Loader({
       reader.readAsText(file);
     });
 
+    document.getElementById('exportButton').addEventListener('click', exportPolygons);
+    document.getElementById('importButton').addEventListener('click', importPolygons);
+
   }).catch(err => {
     console.error("Google Maps failed to load:", err);
   });
@@ -216,106 +219,130 @@ function hideContextMenu() {
   contextMenu.style.display = "none";
 }
 
-function convertPolygonsToKML(data) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<kml xmlns="http://www.opengis.net/kml/2.2">
-  <Document>
-    ${data.map(polygon => `
-      <Placemark>
-        <name>${polygon.name}</name>
-        <Polygon>
-          <outerBoundaryIs>
-            <LinearRing>
-              <coordinates>
-                ${polygon.path.map(pt => `${pt.lng},${pt.lat},0`).join(' ')}
-              </coordinates>
-            </LinearRing>
-          </outerBoundaryIs>
-        </Polygon>
-      </Placemark>
-    `).join('')}
-  </Document>
-</kml>`;
-}
+function serializePolygon(meta) {
+  const path = meta.polygon.getPath().getArray().map(coord => ({
+    lat: coord.lat(),
+    lng: coord.lng()
+  }));
 
-function toGeoJSON(data) {
   return {
-    type: "FeatureCollection",
-    features: data.map(p => ({
-      type: "Feature",
-      properties: {
-        name: p.name,
-        style: p.style
-      },
-      geometry: {
-        type: "Polygon",
-        coordinates: [p.path.map(pt => [pt.lng, pt.lat])]
-      }
-    }))
+    name: meta.name,
+    style: meta.style,
+    path: path,
+    children: meta.children ? meta.children.map(serializePolygon) : []
   };
 }
 
-async function savePolygonsWithDialog(data) {
-  const handle = await window.showSaveFilePicker({
-    suggestedName: "polygons.json",
-    types: [
-      {
-        description: "Polygon Files",
-        accept: {
-          "application/json": [".json"],
-          "application/geo+json": [".geojson"],
-          "application/vnd.google-earth.kml+xml": [".kml"]
+async function exportPolygons() {
+  try {
+    const options = {
+      suggestedName: 'polygons.json',
+      types: [
+        {
+          description: 'Polygon Files',
+          accept: {
+            'application/json': ['.json'],
+            'application/geo+json': ['.geojson'],
+            'application/vnd.google-earth.kml+xml': ['.kml']
+          }
         }
-      }
-    ]
+      ]
+    };
+
+    // Show save file picker
+    const handle = await window.showSaveFilePicker(options);
+    const writable = await handle.createWritable();
+
+    // Serialize polygon data
+    const data = polygonList.map(serializePolygon);
+    const jsonString = JSON.stringify(data, null, 2);
+
+    // Write data to file
+    await writable.write(jsonString);
+    await writable.close();
+
+    showToast('Polygons saved successfully.');
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      console.error('Save failed:', err);
+      showToast('Failed to save polygons.');
+    }
+  }
+}
+
+function deserializePolygon(data, parent = null) {
+  const polygon = new google.maps.Polygon({
+    paths: data.path,
+    ...data.style
   });
 
-  const fileName = handle.name;
-  let content = "";
-  let mimeType = "application/json";
+  const meta = {
+    name: data.name,
+    polygon: polygon,
+    style: data.style,
+    children: [],
+    parent: parent
+  };
 
-  if (fileName.endsWith(".kml")) {
-    content = convertPolygonsToKML(data);
-    mimeType = "application/vnd.google-earth.kml+xml";
-  } else if (fileName.endsWith(".geojson")) {
-    content = JSON.stringify(toGeoJSON(data), null, 2);
-    mimeType = "application/geo+json";
-  } else {
-    content = JSON.stringify(data, null, 2); // default JSON format
-    mimeType = "application/json";
+  if (data.children && data.children.length > 0) {
+    meta.children = data.children.map(childData => deserializePolygon(childData, meta));
   }
 
-  const writable = await handle.createWritable();
-  await writable.write(new Blob([content], { type: mimeType }));
-  await writable.close();
+  return meta;
 }
 
-async function promptExportPolygons() {
-  hideContextMenu();
+async function importPolygons() {
+  try {
+    const options = {
+      types: [
+        {
+          description: 'Polygon Files',
+          accept: {
+            'application/json': ['.json'],
+            'application/geo+json': ['.geojson'],
+            'application/vnd.google-earth.kml+xml': ['.kml']
+          }
+        }
+      ],
+      multiple: false
+    };
 
-  const data = polygonList.map(p => ({
-    name: p.name,
-    path: p.polygon.getPath().getArray().map(latlng => ({
-      lat: latlng.lat(),
-      lng: latlng.lng()
-    })),
-    style: p.style
-  }));
+    // Show open file picker
+    const [handle] = await window.showOpenFilePicker(options);
+    const file = await handle.getFile();
+    const contents = await file.text();
 
-  await savePolygonsWithDialog(data);
+    let data;
+    if (file.name.endsWith('.kml')) {
+      // Parse KML to GeoJSON using togeojson
+      const parser = new DOMParser();
+      const kmlDoc = parser.parseFromString(contents, 'application/xml');
+      const geojson = toGeoJSON.kml(kmlDoc);
+      data = geojson.features.map(feature => ({
+        name: feature.properties.name || 'Unnamed',
+        style: {}, // Extract style if available
+        path: feature.geometry.coordinates[0].map(coord => ({ lat: coord[1], lng: coord[0] })),
+        children: []
+      }));
+    } else {
+      // Parse JSON or GeoJSON
+      data = JSON.parse(contents);
+    }
+
+    // Deserialize and render polygons
+    polygonList = data.map(item => deserializePolygon(item));
+    renderPolygonLevel();
+
+    showToast('Polygons imported successfully.');
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      console.error('Import failed:', err);
+      showToast('Failed to import polygons.');
+    }
+  }
 }
 
-function downloadFile(blob, filename) {
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = filename;
-  link.click();
-}
 
-function triggerImport() {
-  hideContextMenu();
-  document.getElementById("polygon-file-input").click();
-}
 
 function showToast(message, duration = 3000) {
   const toast = document.getElementById("toast");
@@ -588,47 +615,69 @@ document.addEventListener("keydown", function (e) {
   }
 
   function renderPolygonLevel() {
-    // Hide all polygons
     function hideAll(list) {
       list.forEach(meta => {
-        meta.polygon.setMap(null);
-        meta.label.setMap(null);
-        if (meta.children) hideAll(meta.children);
+        if (meta && meta.polygon) meta.polygon.setMap(null);
+        if (meta && meta.label) meta.label.setMap(null);
+        if (meta && Array.isArray(meta.children)) {
+          hideAll(meta.children);
+        }
       });
     }
   
     hideAll(polygonList);
   
-    // Show current level
-    const toShow = currentLevel ? currentLevel.children : polygonList;
+    const toShow = currentLevel && Array.isArray(currentLevel.children) ? currentLevel.children : polygonList;
+  
     toShow.forEach(meta => {
-      meta.polygon.setMap(map);
-      meta.label.setMap(map);
+      if (meta && meta.polygon) meta.polygon.setMap(map);
+      if (meta && meta.label) meta.label.setMap(map);
     });
   
     showToast(`Viewing ${currentLevel?.name || "top-level"} polygons`);
   }
 
+  function findMetaByPolygon(polygon, list = polygonList) {
+    for (const meta of list) {
+      if (meta.polygon === polygon) {
+        return meta;
+      }
+      if (meta.children && meta.children.length > 0) {
+        const found = findMetaByPolygon(polygon, meta.children);
+        if (found) {
+          return found;
+        }
+      }
+    }
+    return null;
+  }
+
   function attachHierarchyNavigation(polygon, metadata) {
     polygon.addListener("click", (e) => {
       if (e.domEvent.altKey && e.domEvent.shiftKey) {
-        // Set the clicked polygon as the new current level
-        currentLevel = metadata;
-    
-        // Render the polygons at the new current level (which may be empty initially)
-        renderPolygonLevel();
+        const clickedMeta = findMetaByPolygon(polygon);
+        if (clickedMeta) {
+          currentLevel = clickedMeta;
+          renderPolygonLevel();
+        } else {
+          showToast("Polygon metadata not found.");
+        }
       }
     });
   
     polygon.addListener("rightclick", (e) => {
       if (e.domEvent.altKey && e.domEvent.shiftKey) {
-        if (metadata.parent) {
-          currentLevel = metadata.parent;
+        if (currentLevel && currentLevel.parent) {
+          currentLevel = currentLevel.parent;
           renderPolygonLevel();
         } else {
-          currentLevel = null;
+          currentLevel = null; // Navigate back to top-level
           renderPolygonLevel();
         }
+      }
+      else
+      {
+        showPolygonContextMenu(polygon, e.latLng, e.domEvent);
       }
     });
   }
@@ -697,29 +746,29 @@ document.addEventListener("keydown", function (e) {
         polygon: polygon,
         label: nameLabel,
         style: {
-          strokeColor: '#FF0000',
-          strokeOpacity: 0.8,
-          strokeWeight: 2,
-          fillColor: '#FF0000',
-          fillOpacity: 0.35
+          strokeColor: strokeColor,
+          strokeOpacity: strokeOpacity,
+          strokeWeight: strokeWeight,
+          fillColor: fillColor,
+          fillOpacity: fillOpacity
         },
         children: [],
         parent: currentLevel
       };
+      
+      if (currentLevel) {
+        currentLevel.children.push(newPolygonMeta);
+      } else {
+        polygonList.push(newPolygonMeta);
+      }
+      
+      //const targetList = currentLevel ? currentLevel.children : polygonList;
+      //targetList.push(newPolygonMeta);
   
-      //polygonList.push({ name, polygon, label: nameLabel, style: { strokeColor, strokeOpacity, strokeWeight, fillColor, fillOpacity } });
-      const targetList = currentLevel ? currentLevel.children : polygonList;
-          targetList.push(newPolygonMeta);
-
-      /* polygon.addListener("rightclick", function (event) {
-        showPolygonContextMenu(polygon, event.latLng);
-      }); */
-
-
-
-      polygon.addListener("rightclick", function (event) {
-        showPolygonContextMenu(polygon, event.latLng, event.domEvent);
-      });
+      
+      //polygon.addListener("rightclick", function (event) {
+      //  showPolygonContextMenu(polygon, event.latLng, event.domEvent);
+      //});
 
       polygon.addListener("dragend", function () {
         const updatedPath = polygon.getPath().getArray();
@@ -835,7 +884,8 @@ document.addEventListener("keydown", function (e) {
   let editingPolygonMeta = null;
 
 function editPolygonProperties() {
-  const meta = polygonList.find(p => p.polygon === selectedPolygon);
+  //const meta = polygonList.find(p => p.polygon === selectedPolygon);
+  const meta = findMetaByPolygon(selectedPolygon);
   if (!meta) return;
 
   editingPolygonMeta = meta;
